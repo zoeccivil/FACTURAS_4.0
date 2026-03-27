@@ -1,0 +1,7 @@
+{
+  "facturas_config": {
+    "firebase_credentials_path": "D:/Dropbox/PROGAIN/PROGAIN_CREDENTIALS/firebase-credentials.json",
+    "firebase_storage_bucket": "facot-app.firebasestorage.app",
+    "firebase_project_id": "facot-app"
+  }
+}
