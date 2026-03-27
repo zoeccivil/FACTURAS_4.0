@@ -11,14 +11,25 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QFrame,
     QMenu,
+    QFileDialog,
+    QScrollArea,
 )
 from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtGui import QFont, QColor
 from datetime import datetime
+import os
 
 try:
     from advanced_retention_window_qt import AdvancedRetentionWindowQt
 except Exception:
     AdvancedRetentionWindowQt = None  # placeholder si aún no está migrada
+
+try:
+    from tax_payments_manager import TaxPaymentManager
+    from tax_payment_report_generator import TaxPaymentReportGenerator
+except Exception:
+    TaxPaymentManager = None
+    TaxPaymentReportGenerator = None
 
 
 class TaxCalculationManagementWindowQt(QDialog):
@@ -37,9 +48,13 @@ class TaxCalculationManagementWindowQt(QDialog):
         super().__init__(parent)
         self.parent = parent
         self.controller = controller
+        
+        # Almacenar datos para reportes
+        self.calculations = []
+        self.company_name = ""
 
         self.setWindowTitle("Gestión de Cálculos de Impuestos")
-        self.resize(820, 500)
+        self.resize(980, 650)
         self.setModal(True)
 
         self._build_ui()
@@ -51,7 +66,7 @@ class TaxCalculationManagementWindowQt(QDialog):
     def _build_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(0)
+        root.setSpacing(12)
 
         card = QFrame()
         card.setObjectName("taxCard")
@@ -59,12 +74,12 @@ class TaxCalculationManagementWindowQt(QDialog):
         card_layout.setContentsMargins(20, 16, 20, 16)
         card_layout.setSpacing(12)
 
+        # ====== ENCABEZADO ======
         header = QHBoxLayout()
         title = QLabel("Cálculos de Impuestos Guardados")
         title.setStyleSheet("font-size: 16px; font-weight: 600; color: #0F172A;")
         subtitle = QLabel(
-            "Administra los escenarios de cálculo de impuestos retenidos y adelantados "
-            "que has guardado previamente."
+            "Administra impuestos, marca pagos y genera reportes mensuales."
         )
         subtitle.setStyleSheet("font-size: 12px; color: #6B7280;")
         subtitle.setWordWrap(True)
@@ -79,6 +94,32 @@ class TaxCalculationManagementWindowQt(QDialog):
         line.setFrameShadow(QFrame.Shadow.Sunken)
         card_layout.addWidget(line)
 
+        # ====== PANEL DE RESUMEN ======
+        summary_frame = QFrame()
+        summary_frame.setObjectName("summaryFrame")
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(0, 0, 0, 0)
+        summary_layout.setSpacing(12)
+
+        # Crear tarjetas de resumen
+        self.total_label = self._create_summary_card("Total", "0", "0")
+        self.paid_label = self._create_summary_card("✓ Pagados", "0", "0")
+        self.pending_label = self._create_summary_card("⧗ Pendientes", "0", "0")
+        self.percentage_label = self._create_summary_card("% Pagado", "0%", "")
+
+        summary_layout.addWidget(self.total_label)
+        summary_layout.addWidget(self.paid_label)
+        summary_layout.addWidget(self.pending_label)
+        summary_layout.addWidget(self.percentage_label)
+
+        card_layout.addWidget(summary_frame)
+
+        line2 = QFrame()
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setFrameShadow(QFrame.Shadow.Sunken)
+        card_layout.addWidget(line2)
+
+        # ====== TABLA DE CÁLCULOS ======
         list_frame = QWidget()
         list_layout = QVBoxLayout(list_frame)
         list_layout.setContentsMargins(0, 0, 0, 0)
@@ -88,20 +129,20 @@ class TaxCalculationManagementWindowQt(QDialog):
         table_label.setStyleSheet("font-weight: 600; color: #4B5563; font-size: 13px;")
         list_layout.addWidget(table_label)
 
-        self.table = QTableWidget(0, 3)  # ✅ Agregada columna "Estado"
+        self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Nombre del Cálculo", "Fecha de Creación", "Estado"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(False)
-        # Menú contextual
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._open_context_menu)
         list_layout.addWidget(self.table)
 
         card_layout.addWidget(list_frame)
 
+        # ====== BOTONES ======
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(0, 8, 0, 0)
         btn_row.setSpacing(8)
@@ -118,6 +159,10 @@ class TaxCalculationManagementWindowQt(QDialog):
         btn_export.setObjectName("secondaryButton")
         btn_export.clicked.connect(self._export)
 
+        btn_report = QPushButton("Generar Reporte Completo")
+        btn_report.setObjectName("successButton")
+        btn_report.clicked.connect(self._generate_full_report)
+
         btn_delete = QPushButton("Eliminar")
         btn_delete.setObjectName("dangerButton")
         btn_delete.clicked.connect(self._delete)
@@ -129,6 +174,7 @@ class TaxCalculationManagementWindowQt(QDialog):
         btn_row.addWidget(btn_new)
         btn_row.addWidget(btn_edit)
         btn_row.addWidget(btn_export)
+        btn_row.addWidget(btn_report)
         btn_row.addStretch()
         btn_row.addWidget(btn_delete)
         btn_row.addWidget(btn_close)
@@ -136,6 +182,7 @@ class TaxCalculationManagementWindowQt(QDialog):
         card_layout.addLayout(btn_row)
         root.addWidget(card)
 
+        # ====== ESTILOS ======
         self.setStyleSheet(
             self.styleSheet()
             + """
@@ -143,6 +190,32 @@ class TaxCalculationManagementWindowQt(QDialog):
             background-color: #FFFFFF;
             border-radius: 12px;
             border: 1px solid #E2E8F0;
+        }
+        QFrame#summaryFrame {
+            background-color: #F9FAFB;
+            border-radius: 8px;
+            border: 1px solid #E2E8F0;
+            padding: 8px;
+        }
+        QFrame#summaryCard {
+            background-color: #FFFFFF;
+            border-radius: 6px;
+            border: 1px solid #E2E8F0;
+            padding: 8px;
+        }
+        QLabel#summaryTitle {
+            font-size: 12px;
+            color: #6B7280;
+            font-weight: 500;
+        }
+        QLabel#summaryValue {
+            font-size: 18px;
+            color: #0F172A;
+            font-weight: 700;
+        }
+        QLabel#summarySubtitle {
+            font-size: 10px;
+            color: #A0AEC0;
         }
         QPushButton#primaryButton {
             background-color: #1E293B;
@@ -166,6 +239,17 @@ class TaxCalculationManagementWindowQt(QDialog):
         QPushButton#secondaryButton:hover {
             background-color: #E5E7EB;
         }
+        QPushButton#successButton {
+            background-color: #F0FDF4;
+            color: #166534;
+            padding: 6px 12px;
+            border-radius: 6px;
+            border: 1px solid #BBEF63;
+            font-weight: 500;
+        }
+        QPushButton#successButton:hover {
+            background-color: #DCFCE7;
+        }
         QPushButton#dangerButton {
             background-color: #FEF2F2;
             color: #B91C1C;
@@ -180,16 +264,43 @@ class TaxCalculationManagementWindowQt(QDialog):
         """
         )
 
+    def _create_summary_card(self, title: str, value: str, subtitle: str) -> QFrame:
+        """Crea una tarjeta de resumen."""
+        card = QFrame()
+        card.setObjectName("summaryCard")
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(2)
+
+        title_label = QLabel(title)
+        title_label.setObjectName("summaryTitle")
+        layout.addWidget(title_label)
+
+        value_label = QLabel(value)
+        value_label.setObjectName("summaryValue")
+        layout.addWidget(value_label)
+
+        if subtitle:
+            subtitle_label = QLabel(subtitle)
+            subtitle_label.setObjectName("summarySubtitle")
+            layout.addWidget(subtitle_label)
+
+        return card
+
     # ------------------------------------------------------------------ #
     # Carga de datos
     # ------------------------------------------------------------------ #
     def _load_calculations(self):
         self.table.setRowCount(0)
+        self.calculations = []
 
         company_id = None
         try:
             if self.parent and hasattr(self.parent, "get_current_company_id"):
                 company_id = self.parent.get_current_company_id()
+                # Intentar obtener nombre de empresa
+                if hasattr(self.parent, "get_current_company_name"):
+                    self.company_name = self.parent.get_current_company_name() or ""
         except Exception:
             company_id = None
 
@@ -214,9 +325,10 @@ class TaxCalculationManagementWindowQt(QDialog):
                         normalized.append({k: c[k] for k in c.keys()})
                     except Exception:
                         normalized.append(c)
-        calculations = normalized
+        
+        self.calculations = normalized
 
-        for calc in calculations:
+        for calc in normalized:
             row = self.table.rowCount()
             self.table.insertRow(row)
 
@@ -230,7 +342,6 @@ class TaxCalculationManagementWindowQt(QDialog):
             date_item = QTableWidgetItem(date_str)
             date_item.setFlags(Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled)
 
-            # ✅ NUEVO: Columna de estado "Pagado" / "Pendiente"
             is_paid = bool(calc.get("is_paid", False))
             status_item = QTableWidgetItem()
             status_item.setFlags(
@@ -248,8 +359,59 @@ class TaxCalculationManagementWindowQt(QDialog):
             self.table.setItem(row, 1, date_item)
             self.table.setItem(row, 2, status_item)
         
-        # ✅ NUEVO: Conectar señal para detectar cambios en el checkbox
+        # Conectar señal para detectar cambios en el checkbox
         self.table.cellClicked.connect(self._on_cell_clicked)
+        
+        # Recalcular totales para cálculos que no tienen monto (migración)
+        self._recalculate_missing_totals()
+        
+        # Actualizar panel de resumen
+        self._update_summary()
+
+    def _update_summary(self):
+        """Actualiza el panel de resumen con datos de pagos."""
+        if TaxPaymentManager is None:
+            return
+        
+        summary = TaxPaymentManager.calculate_payment_summary(self.calculations)
+        
+        total_text = TaxPaymentManager.format_currency(summary.get("total_amount", 0))
+        paid_text = TaxPaymentManager.format_currency(summary.get("paid_amount", 0))
+        pending_text = TaxPaymentManager.format_currency(summary.get("pending_amount", 0))
+        percentage_text = f"{summary.get('paid_percentage', 0)}%"
+        
+        # Actualizar labels (usar find para obtener el label dentro del card)
+        self._update_summary_card_value(self.total_label, total_text)
+        self._update_summary_card_value(self.paid_label, paid_text)
+        self._update_summary_card_value(self.pending_label, pending_text)
+        self._update_summary_card_value(self.percentage_label, percentage_text)
+
+    def _update_summary_card_value(self, card: QFrame, value: str):
+        """Actualiza el valor de una tarjeta de resumen."""
+        for child in card.findChildren(QLabel):
+            if child.objectName() == "summaryValue":
+                child.setText(value)
+                break
+
+    def _recalculate_missing_totals(self):
+        """Recalcula totales para cálculos que no tienen monto guardado (migración)."""
+        if not hasattr(self.controller, "recalculate_tax_calculation_totals"):
+            return
+        
+        try:
+            # Buscar cálculos sin monto o con monto 0
+            for i, calc in enumerate(self.calculations):
+                calc_id = calc.get("id")
+                total_amount = float(calc.get("total_amount") or 0)
+                
+                if total_amount == 0 and calc_id:
+                    # Recalcular desde los detalles
+                    success, new_total, msg = self.controller.recalculate_tax_calculation_totals(calc_id)
+                    if success:
+                        self.calculations[i]["total_amount"] = new_total
+                        print(f"[DEBUG] Recalculado {calc.get('name')}: RD$ {new_total:,.2f}")
+        except Exception as e:
+            print(f"[DEBUG] Error en recalculate_missing_totals: {e}")
 
     def _on_cell_clicked(self, row, column):
         """Maneja el click en las celdas, especialmente para la columna de estado."""
@@ -281,6 +443,14 @@ class TaxCalculationManagementWindowQt(QDialog):
                             Qt.CheckState.Unchecked if new_state else Qt.CheckState.Checked
                         )
                         status_item.setText("⧗ Pendiente" if new_state else "✓ Pagado")
+                    else:
+                        # Actualizar dato local y resumen
+                        if calc_id:
+                            for calc in self.calculations:
+                                if calc.get("id") == calc_id or str(calc.get("id")) == str(calc_id):
+                                    calc["is_paid"] = new_state
+                                    break
+                        self._update_summary()
             except Exception as e:
                 QMessageBox.warning(self, "Error", f"Error al actualizar estado: {e}")
 
@@ -372,7 +542,7 @@ class TaxCalculationManagementWindowQt(QDialog):
 
             if success:
                 QMessageBox.information(self, "Éxito", message)
-                self._load_calculations()
+                self._load_calculations()  # Recarga y actualiza resumen
             else:
                 QMessageBox.critical(self, "Error", message)
         except Exception as e:
@@ -397,6 +567,64 @@ class TaxCalculationManagementWindowQt(QDialog):
             self.controller.open_tax_calculation_pdf(calc_id, parent=self)
         except Exception as e:
             QMessageBox.critical(self, "Error", f"No se pudo generar el PDF: {e}")
+
+    def _generate_full_report(self):
+        """Genera reporte PDF completo con todos los impuestos, pagados y pendientes, organizados por mes."""
+        if not self.calculations:
+            QMessageBox.information(
+                self,
+                "Sin datos",
+                "No hay cálculos para generar el reporte.",
+            )
+            return
+
+        if TaxPaymentManager is None or TaxPaymentReportGenerator is None:
+            QMessageBox.critical(
+                self,
+                "No disponible",
+                "Las dependencias requeridas para generar reportes no están disponibles.",
+            )
+            return
+
+        try:
+            # Seleccionar ubicación para guardar PDF
+            default_filename = f"Reporte_Impuestos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+            file_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Guardar Reporte de Pagos de Impuestos",
+                default_filename,
+                "Archivos PDF (*.pdf);;Todos los archivos (*)",
+            )
+
+            if not file_path:
+                return
+
+            # Generar datos del reporte
+            report_data = TaxPaymentManager.generate_monthly_report_data(
+                self.calculations,
+                self.company_name,
+                include_details=True
+            )
+
+            # Generar PDF
+            generator = TaxPaymentReportGenerator(self.company_name)
+            success, message = generator.generate_pdf(report_data, file_path)
+
+            if success:
+                msg = f"{message}\n\n¿Deseas abrir el reporte ahora?"
+                resp = QMessageBox.question(
+                    self,
+                    "Éxito",
+                    msg,
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                )
+                if resp == QMessageBox.StandardButton.Yes:
+                    os.startfile(file_path)
+            else:
+                QMessageBox.critical(self, "Error", message)
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error al generar reporte: {str(e)}")
 
     # ------------------------------------------------------------------ #
     # Menú contextual

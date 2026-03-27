@@ -1793,6 +1793,10 @@ class LogicControllerFirebase:
 
         NOTA: company_id se guarda siempre como entero (si es posible) para
         ser compatible con los filtros de get_tax_calculations.
+        
+        Ahora también calcula y guarda:
+          - total_amount: suma de montos de facturas seleccionadas
+          - is_paid: inicialmente False para nuevos cálculos
         """
         if not self._db:
             return False, "Firestore no está inicializado."
@@ -1813,16 +1817,29 @@ class LogicControllerFirebase:
             except Exception:
                 company_id_normalized = company_id
 
+            # Calcular total_amount sumando montos de facturas seleccionadas
+            total_amount = 0.0
+            if details:
+                for inv_id, state in details.items():
+                    if bool(state.get("selected", False)):
+                        try:
+                            monto = float(state.get("monto") or state.get("amount") or state.get("total") or 0)
+                            total_amount += monto
+                        except (ValueError, TypeError):
+                            pass
+
             payload = {
                 "company_id": company_id_normalized,
                 "name": name,
                 "start_date": start_date,
                 "end_date": end_date,
                 "percent_to_pay": float(percent or 0.0),
+                "total_amount": total_amount,
                 "updated_at": fb_fs.SERVER_TIMESTAMP,
             }
             if not calc_id:
                 payload["created_at"] = fb_fs.SERVER_TIMESTAMP
+                payload["is_paid"] = False  # Nuevos cálculos son pendientes
 
             payload = {k: v for k, v in payload.items() if v is not None}
             doc_ref.set(payload, merge=True)
@@ -1920,6 +1937,106 @@ class LogicControllerFirebase:
         except Exception as e:
             print(f"[FIREBASE-TAX] Error eliminando cálculo: {e}")
             return False, f"No se pudo eliminar el cálculo: {e}"
+
+    def update_tax_calculation_paid_status(self, calc_id, is_paid: bool):
+        """
+        Actualiza el estado de pago (is_paid) de un cálculo.
+        
+        Args:
+            calc_id: ID del cálculo
+            is_paid: True si está pagado, False si está pendiente
+            
+        Returns:
+            Tupla (success: bool, message: str)
+        """
+        if not self._db:
+            return False, "Firestore no está inicializado."
+
+        if calc_id is None:
+            return False, "ID de cálculo inválido."
+
+        from firebase_admin import firestore as fb_fs
+
+        doc_id = str(calc_id)
+        try:
+            calc_ref = self._db.collection("tax_calculations").document(doc_id)
+            calc_ref.set({
+                "is_paid": bool(is_paid),
+                "updated_at": fb_fs.SERVER_TIMESTAMP,
+            }, merge=True)
+            
+            status_text = "Pagado" if is_paid else "Pendiente"
+            return True, f"Estado actualizado a: {status_text}"
+
+        except Exception as e:
+            print(f"[FIREBASE-TAX] Error actualizando estado de pago: {e}")
+            return False, f"Error al actualizar estado: {e}"
+
+    def recalculate_tax_calculation_totals(self, calc_id):
+        """
+        Recalcula el total_amount de un cálculo basándose en sus detalles.
+        Útil para migrar cálculos antiguos que no tienen monto guardado.
+        
+        Args:
+            calc_id: ID del cálculo
+            
+        Returns:
+            Tupla (success: bool, total_amount: float, message: str)
+        """
+        if not self._db:
+            return False, 0.0, "Firestore no está inicializado."
+
+        doc_id = str(calc_id)
+        
+        try:
+            from firebase_admin import firestore as fb_fs
+            
+            # Obtener los detalles del cálculo
+            details_col = self._db.collection("tax_calculation_details")
+            detail_docs = list(
+                details_col.where("calculation_id", "==", int(calc_id) if str(calc_id).isdigit() else calc_id)
+                .where("selected", "==", True)
+                .stream()
+            )
+            
+            total_amount = 0.0
+            
+            # Para cada factura en el cálculo, obtener su monto
+            for detail_doc in detail_docs:
+                detail = detail_doc.to_dict()
+                invoice_id = detail.get("invoice_id")
+                
+                if invoice_id:
+                    try:
+                        # Obtener la factura
+                        invoice_ref = self._db.collection("invoices").document(str(invoice_id))
+                        invoice_doc = invoice_ref.get()
+                        
+                        if invoice_doc.exists:
+                            invoice_data = invoice_doc.to_dict()
+                            # Usar total en RD$
+                            monto = float(
+                                invoice_data.get("total_amount_rd") or 
+                                invoice_data.get("total_amount") or 
+                                0.0
+                            )
+                            total_amount += monto
+                    except Exception as e:
+                        print(f"[FIREBASE-TAX] Error calculando monto de factura {invoice_id}: {e}")
+                        continue
+            
+            # Guardar el total calculado
+            calc_ref = self._db.collection("tax_calculations").document(doc_id)
+            calc_ref.set({
+                "total_amount": total_amount,
+                "updated_at": fb_fs.SERVER_TIMESTAMP,
+            }, merge=True)
+            
+            return True, total_amount, f"Total recalculado: RD$ {total_amount:,.2f}"
+        
+        except Exception as e:
+            print(f"[FIREBASE-TAX] Error recalculando totales: {e}")
+            return False, 0.0, f"Error recalculando: {e}"
         
 
     def get_tax_calculation_details(self, calc_id):

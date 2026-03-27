@@ -469,6 +469,7 @@ class AdvancedRetentionWindowQt(QDialog):
             self.tree_item_states[inv_id] = {
                 "selected": is_selected,
                 "retention": has_retention,
+                "monto": total_rd,  # Guardar monto en RD$ para el reporte
             }
 
             # ✅ NUEVO: Obtener valores originales y convertidos
